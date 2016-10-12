@@ -122,11 +122,11 @@ proposals:
 - barclamp: neutron
   attributes:
     ml2_mechanism_drivers:
-    - linuxbridge
+    - openvswitch
     ml2_type_drivers:
-    - vlan
-    ml2_type_drivers_default_provider_network: vlan
-    ml2_type_drivers_default_tenant_network: vlan
+    - gre
+    ml2_type_drivers_default_provider_network: gre
+    ml2_type_drivers_default_tenant_network: gre
     ssl:
       generate_certs: true
       insecure: true
