@@ -1,43 +1,43 @@
 ---
 # 9 - 8 nodes: HA IMPI 2 node, KVM x 3, Ceph x 3
 proposals:
-- barclamp: pacemaker
+  - barclamp: pacemaker
   name: services
   attributes:
     stonith:
-      mode: sbd
+      mode: ipmi_barclamp
       sbd:
         nodes:
           @@controller1@@:
             devices:
-            - "@@sbd_device_1@@"
+            - ''
           @@controller2@@:
             devices:
-            - "@@sbd_device_2@@"
+            - ''
+          @@controller3@@:
+            devices:
+            - ''
       per_node:
         nodes:
           @@controller1@@:
             params: ''
           @@controller2@@:
             params: ''
+          @@controller3@@:
+            params: ''
     drbd:
-      enabled: true
   deployment:
     elements:
       pacemaker-cluster-member:
-      - @@controller1@@
-      - @@controller2@@
+      - "@@controller1@@"
+      - "@@controller2@@"
+      - "@@controller3@@"
       hawk-server:
-      - @@controller1@@
-      - @@controller2@@
+      - "@@controller1@@"
+      - "@@controller2@@"
+      - "@@controller3@@"
 
 - barclamp: database
-  attributes:
-    ha:
-      storage:
-        mode: drbd
-        drbd:
-          size: 5
   deployment:
     elements:
       database-server:
@@ -45,11 +45,6 @@ proposals:
 
 - barclamp: rabbitmq
   attributes:
-    ha:
-      storage:
-        mode: drbd
-        drbd:
-          size: 5
     client:
       enable_notifications: true
   deployment:
@@ -59,33 +54,40 @@ proposals:
 
 - barclamp: keystone
   attributes:
-    signing:
-      token_format: uuid
   deployment:
     elements:
       keystone-server:
       - cluster:services
 
-- barclamp: ceph
+- barclamp: swift
   attributes:
-    disk_mode: first
+    replicas: 2
+    cluster_hash: 181d283256
+    keystone_delay_auth_decision: true
+    allow_versions: true
+    middlewares:
+      crossdomain:
+        enabled: true
+      formpost:
+        enabled: true
+      staticweb:
+        enabled: true
+      tempurl:
+        enabled: true
   deployment:
     elements:
-      ceph-calamari: []
-      ceph-mon:
-      - @@ceph1@@
-      - @@ceph2@@
-      - @@ceph3@@
-      ceph-osd:
-      - @@ceph1@@
-      - @@ceph2@@
-      - @@ceph3@@
-      ceph-radosgw:
-      - @@ceph1@@
+      swift-dispersion: []
+      swift-proxy:
+      - cluster:services
+      swift-ring-compute:
+      - "@@controller1@@"
+      swift-storage:
+      - "@@storage-swift1@@"
+      - "@@storage-swift2@@"
 
 - barclamp: glance
   attributes:
-    filesystem_store_datadir: "/images"
+    default_store: swift
   deployment:
     elements:
       glance-server:
@@ -94,19 +96,17 @@ proposals:
 - barclamp: cinder
   attributes:
     volumes:
-    - backend_driver: local
-      backend_name: local_file
-      local:
-        volume_name: cinder-volumes
-        file_name: "/var/lib/cinder/volume.raw"
-        file_size: 2000
+    - backend_driver: nfs
+      backend_name: nfs
+      nfs:
+        nfs_shares: ##cinder-storage-shares##
+        nfs_snapshot: true
   deployment:
     elements:
       cinder-controller:
       - cluster:services
       cinder-volume:
-      - "@@controller1@@"
-      - "@@controller2@@"
+      - cluster:services
 
 - barclamp: neutron
   attributes:
@@ -156,6 +156,20 @@ proposals:
     elements:
       heat-server:
       - cluster:services
+
+- barclamp: barbican
+  attributes:
+  deployment:
+    elements:
+      barbican-controller:
+      - "@@controller1@@"
+
+- barclamp: sahara
+  attributes:
+  deployment:
+    elements:
+      sahara-server:
+      - "@@controller1@@"
 
 - barclamp: tempest
   deployment:

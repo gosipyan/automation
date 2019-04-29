@@ -5,19 +5,17 @@
       <b>This job is managed by JJB! Changes must be done in
       <a href='https://github.com/SUSE-Cloud/automation/tree/master/jenkins/ci.suse.de/'>git</a>
       </b>
-
-      This job will redeploy scenario-9:
-      DVR Neutron
+      Scenario details:
         - 7 nodes
-        - HA with SBD (2 nodes)
-        - ceph (3 nodes)
-        - 2 kvm compute nodes
-        - Neutron: linuxbridge and OVS
+        - HA with IPMI (3 controllers)
+        - shared device for DB and rabbit
+        - swift
+        - Neutron: linuxbridge or OVS
 
-      It will wipe all QA2 machines!
+      It will wipe all machines in the selected cloud!
 
     wrappers:
-      - mkphyscloud-qa-build-name-wrapper      
+      - mkphyscloud-qa-build-name-wrapper
     publishers:
       - mkphyscloud-qa-common-publishers
 
@@ -33,8 +31,13 @@
 
       - string:
           name: admin_os
-          default: sles12sp3
+          default: sles12sp4
           description: Mandatory, admin node operating system version
+
+      - string:
+          name: shared_storage_ip
+          default: 10.162.66.1
+          description: Mandatory, shared storage server IP
 
       - string:
           name: repo_owner
@@ -51,41 +54,49 @@
           default: github.com/$repo_owner/automation#$branch
           description: Mandatory, automation repo URL
 
-      - string:
+      - choice:
           name: networkingplugin
-          default: openvswitch
           description: |
-              networking plugin to be used by Neutron. Available options are: openvswitch:gre, vlan, vxlan / linuxbridge:vlan
+               networking plugin to be used by Neutron. Available options are: openvswitch:gre, vlan, vxlan / linuxbridge:vlan
+          choices:
+            - openvswitch
+            - linuxbridge
 
-      - string:
+      - choice:
           name: networkingmode
-          default: vxlan
-          description: Networking mode to be used by Neutron. Available options are gre, vlan, vxlan
+          description: |
+               networking mode to be used by Neutron. Available options are gre, vlan, vxlan
+          choices:
+            - vxlan
+            - vlan
+            - gre
 
-      - string:
+      - choice:
           name: tempest
           default: smoke
           description: Optional, specify what tempest test(s) to run, e.g. smoke, smoke|full or smoke|defcore
+          choices:
+            - smoke
+            - full
 
-      - bool:
-          name: rally-tests
-          default: false
-          description: Optional, Run rally  tests
-
-      - string:
+      - choice:
           name: ssl_type
           default: no-ssl
           description: "Mandatory, set the SSL configuration for the cloud, available options: no-ssl, ssl-insecure, ssl"
+          choices:
+            - no-ssl
+            - ssl-insecure
+            - ssl
 
       - string:
           name: cloud_version
-          default: "8"
+          default: "9"
           description: Mandatory, version of the cloud to be installed as integer
 
       - string:
           name: scenario_file
           default: qa-scenario-9.yaml
-          description: Scenario YAML file name
+          description: Scenario yaml file name
 
       # Parameters for qa_crowbarsetup.sh
       - string:
@@ -93,14 +104,13 @@
           default: develcloud$cloud_version
 
       - string:
-          name: TESTHEAD
-          default: "1"
-          description: if non-empty, test latest version from Devel:Cloud:Staging
+          name: upgrade_cloudsource
+          default: develcloud$(($cloud_version + 1))
 
       - string:
-          name: want_ceph
+          name: TESTHEAD
           default: "1"
-          description: Install ceph barclamp
+          description: if non-empty, test latest version from Devel:Cloud Stagin
 
       - string:
           name: hacloud
@@ -109,7 +119,7 @@
 
       - string:
           name: clusterconfig
-          default: services=2
+          default: services=3
           description: HA configuration for clusters. Make sense only if hacloud=1
 
       - string:
@@ -118,9 +128,16 @@
           description: Number of nodes to use; is scenario specific
 
       - string:
+          name: want_ipmi
+          default: "1"
+
+      - choice:
           name: commands
-          default: addupdaterepo prepareinstallcrowbar runupdate bootstrapcrowbar installcrowbar allocate waitcloud setup_aliases
-          description: All the steps that needs to be completed to have cloud installed
+          default: addupdaterepo prepareinstallcrowbar runupdate bootstrapcrowbar installcrowbar allocate waitcloud setup_aliases batch
+          description: All the steps that needs to be completed to have cloud installed:When deploying with SSL add "install_ca_certificates" before "batch" command
+          choices:
+            - addupdaterepo prepareinstallcrowbar runupdate bootstrapcrowbar installcrowbar allocate waitcloud setup_aliases batch
+            - addupdaterepo prepareinstallcrowbar runupdate bootstrapcrowbar installcrowbar allocate waitcloud setup_aliases install_ca_certificates batch
 
       - string:
           name: want_test_updates
@@ -136,6 +153,21 @@
           name: UPDATEBEFOREINSTALL
           default: false
           description: add update repos before crowbar install
+
+      - bool:
+          name: trigger_upgrade
+          default: false
+          description: Trigger the upgrade process for this cloud in a separate job
+
+      - bool:
+          name: horizon-tests
+          default: false
+          description: Optional, Run horizon integration tests.
+
+      - bool:
+          name: rally-tests
+          default: false
+          description: Optional, Run rally  tests
 
     builders:
       - shell: |
@@ -157,24 +189,39 @@
           freshadminvm $admin $admin_os
           sleep 100 # time for the admin VM to boot
 
+          # wipe out shared NFS that are being used by this deployment:
+          # /usr/local/sbin/wipe_nfs_shares
+          ssh root@localhost "wipe_nfs_shares qa$hw_number"
+
           # clone, fetch and update the automation repo
           # /usr/local/sbin/update_automation
           update_automation
 
-          # rest of code runs on admin node:
-          env | grep -e networking -e libvirt -e cloud > mkcloud.config
-
-          # copy scripts/ directory onto the admin  node in /root/scripts
+          # put variables needed during the build process into mkcloud.config file
+          env | grep -e networking -e libvirt -e cloud -e upgrade -e TESTHEAD > mkcloud.config
+          # copy scripts/ dir onto the admin node in /root/scripts
           scp -r ~/github.com/$repo_owner/automation/scripts mkcloud.config root@$admin:
 
           # copy scenario file onto the admin node in /root/scenario.yml
           scp ~/github.com/$repo_owner/automation/scripts/scenarios/cloud$cloud_version/qa/$ssl_type/$scenario_file \
               root@$admin:scenario.yml
-
           ret=0
 
+          #Copy CA files
+          if [[ $ssl_type = "ssl" ]]; then
+             ssh root@crowbar$hw_number "mkdir ssl-certs"
+             scp -r /home/jenkins/ssl-certs/qa$hw_number root@crowbar$hw_number:/root/ssl-certs/
+          fi
+
           ssh root@$admin "
+          # Update certificate file paths
+          if [[ $ssl_type = "ssl" ]]; then
+             sed -i -e "s,##certfile##,/etc/cloud/ssl/qa$hw_number/qa$hw_number.cloud.suse.de.crt," scenario.yml
+             sed -i -e "s,##keyfile##,/etc/cloud/ssl/qa$hw_number/qa$hw_number.cloud.suse.de.pem," scenario.yml
+             sed -i -e "s,##cafile##,/etc/cloud/ssl/qa$hw_number/SUSE_CA_suse.de.chain.crt," scenario.yml
+          fi
           export cloud=$cloud ;
+          export hw_number=$hw_number ;
           export UPDATEREPOS=$UPDATEREPOS ;
           export UPDATEBEFOREINSTALL=$UPDATEBEFOREINSTALL ;
           export TESTHEAD=$TESTHEAD ;
@@ -182,107 +229,44 @@
           export nodenumber=$nodenumber ;
           export hacloud=$hacloud ;
           export clusterconfig=$clusterconfig ;
-          export want_node_aliases=controller=2,compute=2,ceph=3 ;
-          export want_node_roles=controller=2,compute=2,storage=3 ;
-          export want_ceph=1 ;
-          export want_dvr=1 ;
-          export networkingplugin=openvswitch ;
-          export networkingmode=vlan ;
-          export cephvolumenumber=1 ;
+          export shared_storage_ip=$shared_storage_ip
+          export want_node_aliases=controller=3,compute=2,storage-swift=2 ;
           export networkingplugin=$networkingplugin ;
           export networkingmode=$networkingmode ;
+          export want_swift=1 ;
+          export cephvolumenumber=1 ;
           export scenario=\"/root/scenario.yml\" ;
           export commands=\"$commands\" "'
 
+          sed -i -e "s,##shared_nfs_for_database##,$shared_storage_ip:/var/$cloud/ha-database," scenario.yml
+          sed -i -e "s,##shared_nfs_for_rabbitmq##,$shared_storage_ip:/var/$cloud/ha-rabbitmq," scenario.yml
+          sed -i -e "s,##cinder-storage-shares##,$shared_storage_ip:/var/$cloud/cinder-storage," scenario.yml
           sed -i -e "s,##networkingplugin##,$networkingplugin," scenario.yml
           sed -i -e "s,##networkingmode##,$networkingmode," scenario.yml
 
           [ $UPDATEBEFOREINSTALL == "true" ] && export updatesteps="addupdaterepo runupdate"
 
-          timeout --signal=ALRM 240m bash -x -c "source scripts/qa_crowbarsetup.sh ; onadmin_runlist $commands"
+          timeout --signal=ALRM 240m bash -x -c ". scripts/qa_crowbarsetup.sh ; onadmin_runlist $commands"
           ' || ret=$?
 
-          echo "mkphyscloud ret=$ret (before scenario)"
 
-          if [ "$ret" = "0" ]; then
-            # ----- Prepare the SBD setup:
-            cat > /tmp/sbd_prepare_$admin <<EOSCRIPT
-              # preparation of iSCSI
-              export ZYPP_LOCK_TIMEOUT=120
-              zypper --gpg-auto-import-keys -p http://download.opensuse.org/repositories/devel:/languages:/python/SLE_12_SP2/ --non-interactive install python-sh
-
-              chmod +x scripts/iscsictl.py
-
-              ./scripts/iscsictl.py --service target --host \$(hostname) --no-key
-              ./scripts/iscsictl.py --service initiator --target_host \$(hostname) --host controller1 --no-key
-              ./scripts/iscsictl.py --service initiator --target_host \$(hostname) --host controller2 --no-key
-
-              # preparation of SBD
-              SBD_DEV1=\$(ssh controller1 echo '/dev/disk/by-id/scsi-\$(lsscsi -i | grep LIO | tr -s " " |cut -d " " -f7)')
-              SBD_DEV2=\$(ssh controller2 echo '/dev/disk/by-id/scsi-\$(lsscsi -i | grep LIO | tr -s " " |cut -d " " -f7)')
-              ssh controller1 "zypper --non-interactive install sbd; sbd -d \$SBD_DEV1 create"
-              ssh controller2 "zypper --non-interactive install sbd; sbd -d \$SBD_DEV2 create"
-               # watchdog configuration
-              ssh controller1 modprobe softdog; echo softdog > /etc/modules-load.d/watchdog.conf
-              ssh controller2 modprobe softdog; echo softdog > /etc/modules-load.d/watchdog.conf
-              # take scenario yaml file and replace /dev/sda with the right thing:
-              sed -i "s|@@sbd_device_1@@|\${SBD_DEV1}|g" scenario.yml
-              sed -i "s|@@sbd_device_2@@|\${SBD_DEV2}|g" scenario.yml
-              # ----- End of SBD
-          EOSCRIPT
-
-            chmod +x /tmp/sbd_prepare_$admin
-            scp /tmp/sbd_prepare_$admin root@$admin:sbd_prepare
-
-            # Check if zypper is used by other application
-            ssh root@$admin '
-              source scripts/qa_crowbarsetup.sh;
-              for node in $(crowbar machines aliases | grep "controller" | grep -oE "^.*[[:space:]]"); do
-                wait_for 20 10 "ssh $node \"zypper refresh\"" "zypper to be available on $node"
-              done
+          if [ $ret != 0 ] ; then
+            ssh $sshopts root@$admin '
+            set -x
+            for node in $(crowbar machines list | grep ^d) ; do
+              (
+              echo "Collecting supportconfig from $node"
+              timeout 400 ssh $node supportconfig | wc
+              timeout 300 scp $node:/var/log/\*tbz /var/log/
+              )&
+            done
+            timeout 500 supportconfig | wc &
+            wait
             '
 
-            ssh root@$admin './sbd_prepare
-            ' || ret=$?
+            scp root@$admin:/var/log/*tbz $artifacts_dir/
+          fi >&2
 
-          fi
-
-          if [ "$ret" = "0" ]; then
-            ssh root@$admin "
-            export cloud=$cloud ;
-            export TESTHEAD=$TESTHEAD ;
-            export cloudsource=$cloudsource ;
-            export nodenumber=$nodenumber ;
-            export hacloud=$hacloud ;
-            export clusterconfig=$clusterconfig ;
-            export want_ceph=1 ;
-            export want_dvr=1 ;
-            export networkingplugin=openvswitch ;
-            export networkingmode=vlan ;
-            export cephvolumenumber=1;
-            export scenario=scenario.yml "'
-
-            timeout --signal=ALRM 240m bash -x -c "source scripts/qa_crowbarsetup.sh ; onadmin_runlist batch;"
-            ' || ret=$?
-
-            if [ $ret != 0 ] ; then
-              ssh root@$admin '
-              set -x
-              for node in $(crowbar machines list | grep ^d) ; do
-                (
-                echo "Collecting supportconfig from $node"
-                timeout 400 ssh $node supportconfig | wc
-                timeout 300 scp $node:/var/log/\*tbz /var/log/
-                )&
-              done
-              timeout 500 supportconfig | wc &
-              wait
-              '
-
-              scp root@$admin:/var/log/*tbz $artifacts_dir/
-            fi >&2
-            echo "mkphyscloud ret=$ret"
-          fi
           exit $ret
 
       - trigger-builds:
@@ -292,6 +276,9 @@
             predefined-parameters: |
               hw_number=$hw_number
               tempest=$tempest
+              horizon-tests=$horizon-tests
+              trigger_upgrade=$trigger_upgrade
               scenario_name=9
               scenario_job_name=$JOB_NAME
               scenario_build_number=$BUILD_NUMBER
+              TESTHEAD=$TESTHEAD
